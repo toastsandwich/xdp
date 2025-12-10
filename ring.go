@@ -6,44 +6,64 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+type RingHeader struct {
+	Producer uint32
+	Consumer uint32
+	Flags    uint32
+	Padding  uint32
+}
+
+// this will Ring struct is used for Rx, Tx
 type Ring struct {
-	Consumer *uint32
-	Producer *uint32
+	Header *RingHeader
+	Buffer []unix.XDPDesc
 
-	Desc *unix.XDPDesc // pointer to first descriptor
-
-	mask uint32
+	raw []byte
 }
 
-func NewRing(base uintptr, off *unix.XDPRingOffset) *Ring {
+func (r *Ring) Close() error {
+	return unix.Munmap(r.raw)
+}
+
+// Ring for Userspace memory
+type URing struct {
+	Header *RingHeader
+	Buffer []int64
+
+	raw []byte
+}
+
+func (r *URing) Close() error {
+	return unix.Munmap(r.raw)
+}
+
+func NewRing(fd int, offset int64, len int, off unix.XDPRingOffset) (*Ring, error) {
+	data, err := unix.Mmap(fd, offset, len, unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED|unix.MAP_POPULATE)
+	if err != nil {
+		return nil, err
+	}
+	header := (*RingHeader)(unsafe.Pointer(&data[0]))
+	bufferPtr := (*unix.XDPDesc)(unsafe.Add(unsafe.Pointer(header), unsafe.Sizeof(*header)))
+	buffer := unsafe.Slice(bufferPtr, off.Desc+uint64(RINGSIZE)*uint64(unsafe.Sizeof(unix.XDPDesc{})))
+
 	return &Ring{
-		Consumer: (*uint32)(unsafe.Pointer(base + uintptr(off.Consumer))),
-		Producer: (*uint32)(unsafe.Pointer(base + uintptr(off.Producer))),
-		Desc:     (*unix.XDPDesc)(unsafe.Pointer(base + uintptr(off.Desc))),
-		mask:     uint32(ringsize - 1),
-	}
+		Header: header,
+		Buffer: buffer,
+		raw:    data,
+	}, nil
 }
 
-func (r *Ring) getDesc(i int) *unix.XDPDesc {
-	return (*unix.XDPDesc)(unsafe.Pointer(uintptr(unsafe.Pointer(r.Desc)) + uintptr(i)*unsafe.Sizeof(*r.Desc)))
-}
-
-func (r *Ring) Write(desc *unix.XDPDesc) bool {
-	next := (*r.Producer + 1) & r.mask
-	if next == *r.Consumer {
-		return false // ring is full
+func NewURing(fd int, offset int64, len int, off unix.XDPRingOffset) (*URing, error) {
+	data, err := unix.Mmap(fd, offset, len, unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED|unix.MAP_POPULATE)
+	if err != nil {
+		return nil, err
 	}
-	targetPtr := r.getDesc(int(*r.Producer & r.mask))
-	*targetPtr = *desc
-	*r.Producer = next
-	return true
-}
-
-func (r *Ring) Read() *unix.XDPDesc {
-	if *r.Consumer == *r.Producer {
-		return nil // ring is empty
-	}
-	desc := r.getDesc(int(*r.Consumer & r.mask))
-	*r.Consumer++
-	return desc
+	header := (*RingHeader)(unsafe.Pointer(&data[0]))
+	bufferPtr := (*int64)(unsafe.Add(unsafe.Pointer(header), unsafe.Sizeof(*header)))
+	buffer := unsafe.Slice(bufferPtr, off.Desc+uint64(RINGSIZE)*uint64(unsafe.Sizeof(int64(0))))
+	return &URing{
+		Header: header,
+		Buffer: buffer,
+		raw:    data,
+	}, nil
 }
