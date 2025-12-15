@@ -33,3 +33,7 @@ func NewUMem(len int) (*UMem, error) {
 	umem.ptr = unsafe.Pointer(&umem.arena[0])
 	return umem, nil
 }
+
+func (u *UMem) Close() error {
+	return unix.Munmap(u.arena)
+}
